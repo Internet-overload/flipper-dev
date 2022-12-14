@@ -9,9 +9,11 @@
 
 struct WSReceiverInfo {
     View* view;
+    FuriTimer* timer;
 };
 
 typedef struct {
+    uint32_t curr_ts;
     FuriString* protocol_name;
     WSBlockGeneric* generic;
 } WSReceiverInfoModel;
@@ -28,6 +30,10 @@ void ws_view_receiver_info_update(WSReceiverInfo* ws_receiver_info, FlipperForma
             flipper_format_read_string(fff, "Protocol", model->protocol_name);
 
             ws_block_generic_deserialize(model->generic, fff);
+
+            FuriHalRtcDateTime curr_dt;
+            furi_hal_rtc_get_datetime(&curr_dt);
+            model->curr_ts = furi_hal_rtc_datetime_to_timestamp(&curr_dt);
         },
         true);
 }
@@ -76,8 +82,14 @@ void ws_view_receiver_info_draw(Canvas* canvas, WSReceiverInfoModel* model) {
     if(model->generic->temp != WS_NO_TEMPERATURE) {
         canvas_draw_icon(canvas, 6, 43, &I_Therm_7x16);
         snprintf(buffer, sizeof(buffer), "%3.1f C", (double)model->generic->temp);
-        canvas_draw_str_aligned(canvas, 47, 47, AlignRight, AlignTop, buffer);
-        canvas_draw_circle(canvas, 38, 46, 1);
+        uint8_t temp_x1 = 47;
+        uint8_t temp_x2 = 38;
+        if(model->generic->temp < -9.0) {
+            temp_x1 = 49;
+            temp_x2 = 40;
+        }
+        canvas_draw_str_aligned(canvas, temp_x1, 47, AlignRight, AlignTop, buffer);
+        canvas_draw_circle(canvas, temp_x2, 46, 1);
     }
 
     if(model->generic->humidity != WS_NO_HUMIDITY) {
@@ -86,12 +98,8 @@ void ws_view_receiver_info_draw(Canvas* canvas, WSReceiverInfoModel* model) {
         canvas_draw_str(canvas, 64, 55, buffer);
     }
 
-    if((int)model->generic->timestamp > 0) {
-        FuriHalRtcDateTime curr_dt;
-        furi_hal_rtc_get_datetime(&curr_dt);
-        uint32_t curr_ts = furi_hal_rtc_datetime_to_timestamp(&curr_dt);
-
-        int ts_diff = (int)curr_ts - (int)model->generic->timestamp;
+    if((int)model->generic->timestamp > 0 && model->curr_ts) {
+        int ts_diff = (int)model->curr_ts - (int)model->generic->timestamp;
 
         canvas_draw_icon(canvas, 91, 46, &I_Timer_11x11);
 
@@ -103,7 +111,7 @@ void ws_view_receiver_info_draw(Canvas* canvas, WSReceiverInfoModel* model) {
                 cnt_min = i;
             }
 
-            if(curr_ts % 2 == 0) {
+            if(model->curr_ts % 2 == 0) {
                 canvas_draw_str_aligned(canvas, 105, 51, AlignLeft, AlignCenter, "Old");
             } else {
                 if(cnt_min >= 59) {
@@ -132,19 +140,38 @@ bool ws_view_receiver_info_input(InputEvent* event, void* context) {
     return true;
 }
 
-void ws_view_receiver_info_enter(void* context) {
-    furi_assert(context);
-}
-
-void ws_view_receiver_info_exit(void* context) {
+static void ws_view_receiver_info_enter(void* context) {
     furi_assert(context);
     WSReceiverInfo* ws_receiver_info = context;
+
+    furi_timer_start(ws_receiver_info->timer, 1000);
+}
+
+static void ws_view_receiver_info_exit(void* context) {
+    furi_assert(context);
+    WSReceiverInfo* ws_receiver_info = context;
+
+    furi_timer_stop(ws_receiver_info->timer);
 
     with_view_model(
         ws_receiver_info->view,
         WSReceiverInfoModel * model,
         { furi_string_reset(model->protocol_name); },
         false);
+}
+
+static void ws_view_receiver_info_timer(void* context) {
+    WSReceiverInfo* ws_receiver_info = context;
+    // Force redraw
+    with_view_model(
+        ws_receiver_info->view,
+        WSReceiverInfoModel * model,
+        {
+            FuriHalRtcDateTime curr_dt;
+            furi_hal_rtc_get_datetime(&curr_dt);
+            model->curr_ts = furi_hal_rtc_datetime_to_timestamp(&curr_dt);
+        },
+        true);
 }
 
 WSReceiverInfo* ws_view_receiver_info_alloc() {
@@ -169,11 +196,16 @@ WSReceiverInfo* ws_view_receiver_info_alloc() {
         },
         true);
 
+    ws_receiver_info->timer =
+        furi_timer_alloc(ws_view_receiver_info_timer, FuriTimerTypePeriodic, ws_receiver_info);
+
     return ws_receiver_info;
 }
 
 void ws_view_receiver_info_free(WSReceiverInfo* ws_receiver_info) {
     furi_assert(ws_receiver_info);
+
+    furi_timer_free(ws_receiver_info->timer);
 
     with_view_model(
         ws_receiver_info->view,
